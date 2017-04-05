@@ -26,13 +26,100 @@ from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn
 from tensorflow.python.ops import standard_ops
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.ops.gen_array_ops import reshape
 
 __all__ = ['l1_regularizer',
            'l2_regularizer',
            'l1_l2_regularizer',
+           'l2_path_regularizer',
            'sum_regularizer',
            'apply_regularization']
 
+# Decorator to distinguish regularizers that need all the weights at once
+def needs_all_weights(regularizer):
+  regularizer.depends_on_all_weights = True
+  return regularizer
+
+# https://arxiv.org/pdf/1506.02617.pdf
+# According to the authors, this regularizer may be useful for ReLU units,
+# due to it's invariant nature to rescaling.
+# NOTE: 
+#   The current implementation works for fully connected networks.
+# TODO: 
+#   Extend the implementation to partially connected nets by
+#   multiplying the weights only along the paths that connect 
+#   the input to the output.
+def l2_path_regularizer(scale, scope=None):
+  """Returns a function that can be used to apply L2 path regularization to weights.
+
+  Args:
+    scale: A scalar multiplier `Tensor`. 0.0 disables the regularizer.
+    scope: An optional scope name.
+
+  Returns:
+    A function with signature `l2_path(weights)` that apply L2 path regularization.
+
+  Raises:
+    ValueError: If scale is negative or if scale is not a float.
+  """
+  if isinstance(scale, numbers.Integral):
+    raise ValueError('scale cannot be an integer: %s' % scale)
+  if isinstance(scale, numbers.Real):
+    if scale < 0.:
+      raise ValueError('Setting a scale less than 0 on a regularizer: %g' %
+                       scale)
+    if scale == 0.:
+      logging.info('Scale of 0 disables regularizer.')
+      return lambda _: None
+
+  @needs_all_weights
+  def l2_path(weights_list, name=None):
+    """Applies L2 path regularization to weights.
+    
+    Args:
+      weights_list: A list of weight tensors accross the layers of
+                    the fully connected neural net.
+    """
+
+    with ops.name_scope(scope, 'l2_path_regularizer', weights_list) as name:
+      # We require the input to the regularizer to be a list of weights
+      if type(weights_list) is not list or not weights_list:
+        raise TypeError('A list of the weights is required.')
+
+      # Cast the data types of `my_scale`, `initializer`, 'rescaler' to that of the weights
+      dtype = weights_list[0].dtype.base_dtype
+      my_scale = ops.convert_to_tensor(scale,
+                                       dtype=dtype,
+                                       name='scale')
+
+      initializer = constant_op.constant(1.,
+                                         dtype=dtype,
+                                         name='initializer')
+
+      # Since L2LossOp multiplies the L2 regularization of each weight tensor by 0.5,
+      # our final result will be off by a factor of 0.5 ^ (len(weights_list)-1).
+      rescaler = constant_op.constant(pow(2, len(weights_list)-1),
+                                      dtype=dtype,
+                                      name='rescaler')
+
+      # The sum of the scaled weights along the input->output paths on the graph
+      scaled_reduced_path_products = standard_ops.foldl(
+                                         lambda x, y: standard_ops.multiply(x, nn.l2_loss(y)), 
+                                         weights_list, 
+                                         initializer=initializer)
+
+      # We apply the `rescaler` to obtain a desired scale factor of 0.5
+      reduced_path_products = standard_ops.multiply(
+          rescaler,
+          scaled_reduced_path_products
+        )
+
+      # Apply the desired amount of regularization
+      return standard_ops.multiply(
+        my_scale,
+        reduced_path_products, name=name)
+
+  return l2_path
 
 def l1_regularizer(scale, scope=None):
   """Returns a function that can be used to apply L1 regularization to weights.
@@ -182,15 +269,24 @@ def apply_regularization(regularizer, weights_list=None):
     raise ValueError('No weights to regularize.')
   with ops.name_scope('get_regularization_penalty',
                       values=weights_list) as scope:
-    penalties = [regularizer(w) for w in weights_list]
-    penalties = [
-        p if p is not None else constant_op.constant(0.0) for p in penalties
-    ]
-    for p in penalties:
-      if p.get_shape().ndims != 0:
+    # Some regularizations are not (simple) linear combinations of the weights
+    # and require all of the weights at once.
+    if hasattr(regularizer, 'depends_on_all_weights'):
+      summed_penalty = regularizer(weights_list, name=scope)
+      if summed_penalty.get_shape().ndims != 0:
         raise ValueError('regularizer must return a scalar Tensor instead of a '
                          'Tensor with rank %d.' % p.get_shape().ndims)
+    else:
+      penalties = [regularizer(w) for w in weights_list]
+      penalties = [
+          p if p is not None else constant_op.constant(0.0) for p in penalties
+      ]
+      for p in penalties:
+        if p.get_shape().ndims != 0:
+          raise ValueError('regularizer must return a scalar Tensor instead of a '
+                           'Tensor with rank %d.' % p.get_shape().ndims)
 
-    summed_penalty = math_ops.add_n(penalties, name=scope)
+      summed_penalty = math_ops.add_n(penalties, name=scope)
+
     ops.add_to_collection(ops.GraphKeys.REGULARIZATION_LOSSES, summed_penalty)
     return summed_penalty

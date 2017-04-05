@@ -31,6 +31,37 @@ from tensorflow.python.platform import test
 
 class RegularizerTest(test.TestCase):
 
+  def test_l2_path(self):
+    with self.assertRaises(ValueError):
+      regularizers.l2_path_regularizer(-1.)
+    with self.assertRaises(ValueError):
+      regularizers.l2_path_regularizer(0)
+    with self.assertRaises(TypeError):
+      # Make sure a TypeError is raised if the input is not a list
+      values = np.array([1., 1.])
+      tesnor_values = constant_op.constant(values)
+      regularizers.l2_path_regularizer(1.)(tesnor_values)
+
+    self.assertIsNone(regularizers.l2_path_regularizer(0.)(None))
+
+    # Basic test
+    array_weights_list = np.array([[1., 1.], [1., 1.]])
+    tensor_weights_list = [constant_op.constant(x) for x in array_weights_list]
+    with session.Session() as sess:
+      result = sess.run(regularizers.l2_path_regularizer(1.)(tensor_weights_list))
+
+    self.assertAllClose(2.0, result)
+
+    # Make sure the modified `apply_regularizer` works correctly on L2 Path
+    regularizer = regularizers.l2_path_regularizer(1.)
+    array_weights_list = [[2., 1.], [3., 1.]]
+    tensor_weights_list = [constant_op.constant(x) for x in array_weights_list]
+    expected = 25.0
+    with session.Session() as sess:
+      result = sess.run(regularizers.apply_regularization(regularizer,
+                                                 tensor_weights_list))
+    self.assertAllClose(expected, result)
+
   def test_l1(self):
     with self.assertRaises(ValueError):
       regularizers.l1_regularizer(-1.)
