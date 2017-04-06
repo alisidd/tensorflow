@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numbers
+import math
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import ops
@@ -32,6 +33,7 @@ __all__ = ['l1_regularizer',
            'l2_regularizer',
            'l1_l2_regularizer',
            'l2_path_regularizer',
+           'lp_path_regularizer',
            'sum_regularizer',
            'apply_regularization']
 
@@ -49,6 +51,23 @@ def needs_all_weights(regularizer):
 #   Extend the implementation to partially connected nets by
 #   multiplying the weights only along the paths that connect 
 #   the input to the output.
+def lp_path_regularizer(a, b, p=2, sess=tf.Session()):
+  path_accumulation = 0
+  a_num_rows = a.get_shape()[0] # number of rows in a
+  b_num_rows = b.get_shape()[0] # number of rows in b
+  
+  for a_num_row in range(0, a_num_rows):
+    a_values = sess.run(a)[a_num_row]
+
+    for a_index in range(0, len(a_values)):
+    b_values = sess.run(b)[a_index]
+
+    for b_value in b_values:
+      a_value = a_values[a_index]
+      path_accumulation += pow(abs(a_value), p) * pow(abs(b_value), p)
+
+  return pow(path_accumulation, 1.0/p)
+  
 def l2_path_regularizer(scale, scope=None):
   """Returns a function that can be used to apply L2 path regularization to weights.
 
